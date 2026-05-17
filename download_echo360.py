@@ -1,12 +1,16 @@
 from base64 import b64decode
 from bs4 import BeautifulSoup as bs
+from bs4 import Tag
 from pathlib import Path
 from subprocess import run
+from typing import cast
 import datetime as dt
 import json
 import pandas as pd
+import requests
+import yt_dlp.extractor.common
 
-from utils import logTime
+from utils import logTime, load_cookies
 
 # Config
 HOMEPAGE = input(
@@ -33,16 +37,13 @@ SUPPRESS_WARNINGS = True
 
 COOKIE = "cookies_echo360.txt"
 
-COOKIEPATH = Path(COOKIE).absolute()
-COOKIEPATH.touch()
-with open(COOKIEPATH, 'rt') as f:
-    c = f.read()
+cookie_dict = load_cookies(COOKIE)
+del cookie_dict['CloudFront-Key-Pair-Id']
+del cookie_dict['CloudFront-Policy']
+del cookie_dict['CloudFront-Signature']
+del cookie_dict['CloudFront-Tracking2']
 
-if len(c) <= 1:
-    print(f"\nPlease export cookies from your browser with Cookie-Editor, then paste into '{COOKIEPATH}'")
-    input("Press Enter to continue...")
-
-COOKIE_OPTION = f'--cookies "{COOKIEPATH}"'
+COOKIE_OPTION = f'--cookies "{COOKIE}"'
 OPTIONS_CONSTANT = ' '.join([
     '--no-warnings' if SUPPRESS_WARNINGS else '',
     COOKIE_OPTION,
@@ -56,7 +57,6 @@ OPTIONS_CONSTANT = ' '.join([
 YTDLP_CMD = "yt-dlp.exe"
 LESSONTIME_FMTSPEC = "%a %I %p"
 LESSONDATE_FMTSPEC = "%Y-%m-%d"
-lessons_cancelled = set([t.date() for t in LESSONS_CANCELLED])
 
 OPTIONS_DUMP_JSON = ' '.join([
     f'"{YTDLP_CMD}"',
@@ -67,19 +67,15 @@ OPTIONS_DUMP_JSON = ' '.join([
 
 jsonDecoder = json.JSONDecoder()
 
-run(' '.join([
-    '"{}"',
-    '--no-warnings' if SUPPRESS_WARNINGS else '\0',
-    '--force-overwrite',
-    COOKIE_OPTION,
-    '--referer "{}"',
-    '-o syllabus.json',
-    '--dump-pages',
-    '"{}syllabus"'
-]).format(YTDLP_CMD, HOMEPAGE, HOMEPAGE.removesuffix("home")))
+r = requests.get(url=f"{HOMEPAGE.removesuffix("home")}syllabus", cookies=cookie_dict)
 
-with open("syllabus.json", 'rt') as j:
-    syllabus = json.load(j)['data']
+syllabus = r.json()['data']
+
+# headers_dict = {'user-agent':
+#     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+#     AppleWebKit/537.36 (KHTML, like Gecko) \
+#     Chrome/84.0.4147.105 Safari/537.36"
+# }
 
 def getTime(s: str) -> dt.datetime:
     s = s.removesuffix('Z')
@@ -91,14 +87,16 @@ def get_params(lesson) -> tuple[str, str]:
     return mediaTitle, refURL
 
 def dump_soup(opts: str, url: str) -> bs:
-    return bs(
-        b64decode(
-            run(' '.join([
+    res = run(' '.join([
                     OPTIONS_DUMP_JSON,
                     opts,
                     f'"{url}"'
                 ]), capture_output=True, text=True
-            ).stdout.format().splitlines()[3].strip(), validate=True
+            ).stdout
+    # print(res)
+    return bs(
+        b64decode(
+            res.format().splitlines()[3].strip(), validate=True
         ).decode(), "html.parser"
     )
 
@@ -140,12 +138,10 @@ def get_videoURL(lesson_data: dict) -> str:
     assert(videoURL != '')
     return videoURL.removesuffix('&x-act=videoView&x-src=desktop')
 
-def get_date_from_time_attr(d: str, s: str) -> dt.datetime:
-    return dt.datetime.strptime(
-        d.find(
-            itemprop=s # type: ignore
-        )['content'], "%d-%m-%Y"
-    )
+def get_date_from_time_attr(d: Tag, s: str) -> dt.datetime:
+    date = cast(Tag, d.find(itemprop=s))
+    date = str(date.get('content'))
+    return dt.datetime.strptime(date, "%d-%m-%Y")
 
 date_store = Path(f"dates{YEAR}.txt")
 date_store.touch()
@@ -153,25 +149,35 @@ with open(date_store, 'rt') as f:
     hols_as_strings = f.readlines()
 
 if len(hols_as_strings) == 0:
-    htmlstr = dump_soup(
-        opts='--extractor-args "generic:impersonate"',
-        url="https://www.unimelb.edu.au/dates"
-    ).find(
-        class_="mobile-wrap"
-    ).table.tbody.find_all( # pyright: ignore[reportOptionalMemberAccess]
-        name='tr', itemscope=True
+    UnimelbIE = yt_dlp.extractor.common.InfoExtractor(downloader=yt_dlp.YoutubeDL())
+    webpage = UnimelbIE._download_webpage_handle(
+        url_or_request="https://www.unimelb.edu.au/dates", video_id='',
+        note="Downloading Unimelb key dates", impersonate=True
     )
+    # yt_dlp.networking.impersonate.ImpersonateTarget()
+    if isinstance(webpage, tuple):
+        soup = bs(webpage[0], "html.parser")
+    else:
+        soup = dump_soup(
+            opts='--extractor-args "generic:impersonate"',
+            url="https://www.unimelb.edu.au/dates"
+        )
+
+    htmlstr = soup.find(class_="mobile-wrap"
+        ).table.tbody.find_all( # pyright: ignore[reportOptionalMemberAccess]
+            name='tr', itemscope=True
+        )
 
     holidays = []
     for tr in htmlstr:
-        activity = tr.select_one(
-            'td[headers*="wcag-activity"]'
-        ).find( # type: ignore
+        activity = tr.select_one('td[headers*="wcag-activity"]'
+        ).find( # pyright: ignore[reportOptionalMemberAccess]
             itemprop="name"
-        ).getText().lower() # type: ignore
-        date = tr.select_one('td[headers*="wcag-date"]')
-        startDate = get_date_from_time_attr(date, "startTime") # type: ignore
-        endDate = get_date_from_time_attr(date, "endTime") # type: ignore
+        ).getText( # pyright: ignore[reportOptionalMemberAccess]
+        ).lower()
+        date = cast(Tag, tr.select_one('td[headers*="wcag-date"]'))
+        startDate = get_date_from_time_attr(date, "startTime") # pyright: ignore[reportArgumentType]
+        endDate = get_date_from_time_attr(date, "endTime") # pyright: ignore[reportArgumentType]
         if (
             (len(tr['class']))
             and
@@ -191,23 +197,18 @@ if len(hols_as_strings) == 0:
             for day in daterange:
                 holidays.append(day.date())
 
-    hols_as_strings = set([
-        dt.datetime.strftime(
-            h, LESSONDATE_FMTSPEC
-        ) + '\n'
-        for h in holidays
-    ])
+    hols_as_strings = [dt.datetime.strftime(h, LESSONDATE_FMTSPEC) + '\n' for h in holidays]
+    hols_as_strings.sort()
+    hols_as_strings = set(hols_as_strings)
     with open(date_store, 'wt') as f:
         f.writelines(hols_as_strings)
 else:
     holidays = set([
-        dt.datetime.strptime(
-            l.strip(), LESSONDATE_FMTSPEC
-        ).date()
+        dt.datetime.strptime(l.strip(), LESSONDATE_FMTSPEC).date()
         for l in hols_as_strings
     ])
 
-def is_lesson_in_attended_stream(lesson_attended: bool) -> bool:
+def is_lesson_in_attended_stream() -> bool:
     for lesson_in_stream in LESSONS_ATTENDED:
         if (
             (t.weekday() == lesson_in_stream.weekday())
@@ -215,8 +216,9 @@ def is_lesson_in_attended_stream(lesson_attended: bool) -> bool:
             (t.hour == lesson_in_stream.hour)
             ):
             return True
-    return lesson_attended
+    return False
 
+lessons_cancelled = set([t.date() for t in LESSONS_CANCELLED])
 syllabus_dict = {}
 for l in syllabus:
     lesson_attended = False
@@ -233,7 +235,7 @@ for l in syllabus:
         ):
         lesson_attended = False
     elif LECTURE_STREAMS:
-        lesson_attended = is_lesson_in_attended_stream(lesson_attended)
+        lesson_attended = is_lesson_in_attended_stream()
     else:
         lesson_attended = True
 

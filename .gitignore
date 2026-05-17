@@ -1,5 +1,6 @@
-__pycache__
-.vscode
+__pycache__/
+.vscode/
+.venv/
 cookies*.txt
 dates*
 download/
