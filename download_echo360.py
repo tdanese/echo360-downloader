@@ -18,7 +18,7 @@ HOMEPAGE = input(
 Copy the homepage URL of the subject you want to download lectures from and \
 paste it here, then press Enter:
 """
-# )
+)
 # START = 28 # Set this to the number of the the most recent lecture that you already have or 0
 start_number = input("Enter the number of the most recent lecture that you already have or 0: ")
 YEAR = 2026
