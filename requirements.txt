@@ -1,0 +1,10 @@
+brotli>=1.2.0
+bs4>=0.0.2
+curl_cffi>=0.15.0
+mutagen>=1.47.0
+pandas>=3.0.3
+pycryptodomex>=3.23.0
+requests>=2.34.2
+websockets>=16.0
+yt-dlp-ejs>=0.8.0
+yt-dlp>=2026.3.17

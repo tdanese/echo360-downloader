@@ -47,7 +47,7 @@ del cookie_dict['CloudFront-Tracking2']
 LESSONTIME_FMTSPEC = "%a %I %p"
 LESSONDATE_FMTSPEC = "%Y-%m-%d"
 
-DEBUG_MODE = True
+DEBUG_MODE = False
 
 print('Start: ' + logTime() + '\n')
 START = int(start_number)
