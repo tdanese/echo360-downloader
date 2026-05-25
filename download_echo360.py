@@ -1,16 +1,16 @@
-from base64 import b64decode
 from bs4 import BeautifulSoup as bs
 from bs4 import Tag
 from pathlib import Path
-from subprocess import run
+from time import sleep
 from typing import cast
 import datetime as dt
 import json
 import pandas as pd
 import requests
 import yt_dlp.extractor.common
+import yt_dlp.networking.impersonate
 
-from utils import logTime, load_cookies
+from utils import dump_for_debugging, logTime, load_cookies, sanitise_filename
 
 # Config
 HOMEPAGE = input(
@@ -18,8 +18,9 @@ HOMEPAGE = input(
 Copy the homepage URL of the subject you want to download lectures from and \
 paste it here, then press Enter:
 """
-)
-START = 19 # Set this to the number of the the most recent lecture that you already have or 0
+# )
+# START = 28 # Set this to the number of the the most recent lecture that you already have or 0
+start_number = input("Enter the number of the most recent lecture that you already have or 0: ")
 YEAR = 2026
 MONTH = 3
 LECTURE_STREAMS = False
@@ -33,87 +34,53 @@ LESSONS_CANCELLED = [
     dt.datetime(YEAR, 4, 16)
 ]
 
-SUPPRESS_WARNINGS = True
+FORMAT_SORT = "+width~640"
+FORMAT_SELECT = "bv+q0-Default"
 
 COOKIE = "cookies_echo360.txt"
-
 cookie_dict = load_cookies(COOKIE)
 del cookie_dict['CloudFront-Key-Pair-Id']
 del cookie_dict['CloudFront-Policy']
 del cookie_dict['CloudFront-Signature']
 del cookie_dict['CloudFront-Tracking2']
 
-COOKIE_OPTION = f'--cookies "{COOKIE}"'
-OPTIONS_CONSTANT = ' '.join([
-    '--no-warnings' if SUPPRESS_WARNINGS else '',
-    COOKIE_OPTION,
-    '--embed-metadata',
-    '-S +width~640',
-    '-f "bv+q0-Default"',
-    '-P "download/{course_code}/Lectures"',
-    # '-F',
-])
-
-YTDLP_CMD = "yt-dlp.exe"
 LESSONTIME_FMTSPEC = "%a %I %p"
 LESSONDATE_FMTSPEC = "%Y-%m-%d"
 
-OPTIONS_DUMP_JSON = ' '.join([
-    f'"{YTDLP_CMD}"',
-    '--no-warnings',
-    '--skip-download',
-    '--dump-pages'
-])
+DEBUG_MODE = True
 
-jsonDecoder = json.JSONDecoder()
-
-r = requests.get(url=f"{HOMEPAGE.removesuffix("home")}syllabus", cookies=cookie_dict)
-
-syllabus = r.json()['data']
-
-# headers_dict = {'user-agent':
-#     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
-#     AppleWebKit/537.36 (KHTML, like Gecko) \
-#     Chrome/84.0.4147.105 Safari/537.36"
-# }
+print('Start: ' + logTime() + '\n')
+START = int(start_number)
 
 def getTime(s: str) -> dt.datetime:
     s = s.removesuffix('Z')
     return dt.datetime.strptime(s[:-4], "%Y-%m-%dT%H:%M:%S")
 
-def get_params(lesson) -> tuple[str, str]:
-    mediaTitle = lesson['lesson']['name']
-    refURL = f'https://echo360.net.au/lesson/{lesson['lesson']['id']}/classroom'
-    return mediaTitle, refURL
+def get_lesson_url(lesson) -> str:
+    return f"https://echo360.net.au/lesson/{lesson['lesson']['id']}/classroom"
 
-def dump_soup(opts: str, url: str) -> bs:
-    res = run(' '.join([
-                    OPTIONS_DUMP_JSON,
-                    opts,
-                    f'"{url}"'
-                ]), capture_output=True, text=True
-            ).stdout
-    # print(res)
-    return bs(
-        b64decode(
-            res.format().splitlines()[3].strip(), validate=True
-        ).decode(), "html.parser"
-    )
-
+jsonDecoder = json.JSONDecoder()
 def get_json_decoded(refURL: str) -> dict:
-    html_str = dump_soup(
-        opts=COOKIE_OPTION + f' --referer "{refURL}"',
-        url=refURL
-    ).find_all(
-        name="script"
-    )[-1].getText()
-    a = html_str.find("echoPlayerV2FullApp")
+    resp = requests.get(url=refURL, cookies=cookie_dict)
+    soup = bs(resp.text, "html.parser")
+    html_str = soup.body.find_all_next(name="script") # type: ignore
+    html_str = html_str[1].string
+    html_str = cast(str, html_str)
+    a = html_str.find('echoPlayerV2FullApp"]("')
     b = html_str.rfind("echoPlayerV2FullApp")
     html_str = html_str[a:b]
     html_str = html_str[:html_str.rfind('");')]
     html_str = html_str.removeprefix('echoPlayerV2FullApp"]("')
     html_str = html_str.strip().replace(r'\"', '"')
-    return jsonDecoder.decode(html_str)
+    decoded_json = jsonDecoder.decode(html_str)
+    if DEBUG_MODE:
+        refURL_sanitised = sanitise_filename(refURL)
+        dump_for_debugging({
+            f"{refURL_sanitised}_request_decoded.json": decoded_json,
+            f"{refURL_sanitised}_request_headers.json": dict(resp.headers),
+            f"{refURL_sanitised}_request.html": soup.prettify(),
+        })
+    return decoded_json
 
 def get_videoURL(lesson_data: dict) -> str:
     medias = lesson_data["video"]["playableMedias"]
@@ -148,21 +115,38 @@ date_store.touch()
 with open(date_store, 'rt') as f:
     hols_as_strings = f.readlines()
 
-if len(hols_as_strings) == 0:
+def download_key_dates(fatal: bool = False) -> bs | bool:
     UnimelbIE = yt_dlp.extractor.common.InfoExtractor(downloader=yt_dlp.YoutubeDL())
     webpage = UnimelbIE._download_webpage_handle(
         url_or_request="https://www.unimelb.edu.au/dates", video_id='',
-        note="Downloading Unimelb key dates", impersonate=True
+        note="Downloading Unimelb key dates", impersonate=True, fatal=fatal
     )
-    # yt_dlp.networking.impersonate.ImpersonateTarget()
-    if isinstance(webpage, tuple):
-        soup = bs(webpage[0], "html.parser")
+    if DEBUG_MODE:
+        if isinstance(webpage, tuple):
+            dump_for_debugging({
+                "dates.html": webpage[0],
+                "dates_response.txt": webpage[1].headers.as_string()
+            })
+    if webpage:
+        return bs(webpage[0], "html.parser")
     else:
-        soup = dump_soup(
-            opts='--extractor-args "generic:impersonate"',
-            url="https://www.unimelb.edu.au/dates"
-        )
+        return webpage
 
+if (
+    (len(hols_as_strings) == 0)
+    or
+    (DEBUG_MODE)
+):
+    soup = download_key_dates(fatal=False)
+    if not soup:
+        print("Unable to download key dates, retrying in 10 seconds")
+        sleep(10)
+        soup = download_key_dates(fatal=True)
+    if not soup:
+        print("Failed to download key dates")
+        exit()
+
+    soup = cast(bs, soup)
     htmlstr = soup.find(class_="mobile-wrap"
         ).table.tbody.find_all( # pyright: ignore[reportOptionalMemberAccess]
             name='tr', itemscope=True
@@ -176,8 +160,8 @@ if len(hols_as_strings) == 0:
         ).getText( # pyright: ignore[reportOptionalMemberAccess]
         ).lower()
         date = cast(Tag, tr.select_one('td[headers*="wcag-date"]'))
-        startDate = get_date_from_time_attr(date, "startTime") # pyright: ignore[reportArgumentType]
-        endDate = get_date_from_time_attr(date, "endTime") # pyright: ignore[reportArgumentType]
+        startDate = get_date_from_time_attr(date, "startTime")
+        endDate = get_date_from_time_attr(date, "endTime")
         if (
             (len(tr['class']))
             and
@@ -220,6 +204,14 @@ def is_lesson_in_attended_stream() -> bool:
 
 lessons_cancelled = set([t.date() for t in LESSONS_CANCELLED])
 syllabus_dict = {}
+r = requests.get(url=f"{HOMEPAGE.removesuffix("home")}syllabus", cookies=cookie_dict)
+syllabus = r.json()['data']
+if DEBUG_MODE:
+    dump_for_debugging({
+        f"syllabus_response_{r.status_code}.txt": dict(r.headers),
+        f"syllabus.json": r.json(),
+    })
+
 for l in syllabus:
     lesson_attended = False
     lesson_data = l['lesson']
@@ -242,42 +234,41 @@ for l in syllabus:
     if lesson_attended:
         syllabus_dict.update({t: lesson_data})
 
-def download(st: dt.datetime, idx: int, opts: str, title: str, ref: str, url:str) -> None:
+syllabus_as_list = list(syllabus_dict.items())[START:]
+startTime, lesson = syllabus_as_list.pop(0)
+refURL = get_lesson_url(lesson)
+lesson_json = get_json_decoded(refURL)
+COURSE_CODE = lesson_json['sectionInfo']['course']['courseIdentifier']
+
+video_download_opts = {
+    'cookiefile': COOKIE,
+    'format_sort': [FORMAT_SORT],
+    'format': FORMAT_SELECT,
+    'paths': {'home': f"download/{COURSE_CODE}/Lectures"},
+    'impersonate': yt_dlp.networking.impersonate.ImpersonateTarget(),
+}
+echo360DL = yt_dlp.YoutubeDL(video_download_opts) # type: ignore
+
+def download(st: dt.datetime, idx: int, url:str) -> None:
     filename = f'{COURSE_CODE} L{idx:02} {st.strftime("%a %d %b")}'
     if LECTURE_STREAMS:
         filename += ' ' + st.strftime("%I %p")
-    options_formatted = opts.format(
-        mediaTitle=title,
-        filename=filename,
-        refURL=ref
-    )
-    command = f'"{YTDLP_CMD}" {options_formatted} "{url}"'
-    print(f'[{logTime()}]\n    {command}')
-    run(command)
+    filename += ".mp4"
+    print(f"[{logTime()}]\tDownloading {url} to '{filename}'")
+    echo360DL.params['outtmpl']['default'] = filename # type: ignore
+    echo360DL.params['verbose'] = DEBUG_MODE
+    echo360DL.download([url])
     return None
 
-syllabus_as_list = list(syllabus_dict.items())[START:]
-
-print('Start: ' + logTime() + '\n')
-startTime, lesson = syllabus_as_list.pop(0)
-mediaTitle, refURL = get_params(lesson)
-lesson_json = get_json_decoded(refURL)
-COURSE_CODE = lesson_json['sectionInfo']['course']['courseIdentifier']
-options = ' '.join([
-    OPTIONS_CONSTANT.format(course_code=COURSE_CODE),
-    '--replace-in-metadata "title" "^.*$" "{mediaTitle}"',
-    '-o "{filename}.mp4"',
-    '--referer "{refURL}"'
-])
 videoURL = get_videoURL(lesson_json)
 counter = START + 1
-download(st=startTime, idx=counter, opts=options, title=mediaTitle, ref=refURL, url=videoURL)
+download(st=startTime, idx=counter, url=videoURL)
 
 for startTime, lesson in syllabus_as_list:
     counter += 1
     if len(lesson["medias"]) == 0: continue
-    mediaTitle, refURL = get_params(lesson)
+    refURL = get_lesson_url(lesson)
     videoURL = get_videoURL(get_json_decoded(refURL))
-    download(st=startTime, idx=counter, opts=options, title=mediaTitle, ref=refURL, url=videoURL)
+    download(st=startTime, idx=counter, url=videoURL)
 
 print('\nFinish: ' + logTime())

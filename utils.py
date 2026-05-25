@@ -1,6 +1,7 @@
 from pathlib import Path
 from subprocess import run
 import datetime as dt
+import json
 
 def load_cookies(cookie: str) -> dict[str, str]:
     cookiepath = Path(cookie).absolute()
@@ -57,4 +58,16 @@ def update_exe(yt_dlp_path: str="yt-dlp", deno_path: str="deno", days_since_last
         run(f'"{deno_path}" upgrade')
         with open(last_update_path, 'wt') as f:
             f.write(today.strftime(fmtStr))
+    return None
+
+def dump_for_debugging(dump: dict[str, str | dict]) -> None:
+    for filepath, obj in dump.items():
+        Path(filepath).touch()
+        with open(filepath, 'wt', encoding='utf-8', newline='\n') as f:
+            if isinstance(obj, dict):
+                json.dump(obj=obj, fp=f, ensure_ascii=False, indent=2)
+                print(f"[{logTime()}] Dumping '{filepath}' as JSON")
+            else:
+                f.write(obj)
+                print(f"[{logTime()}] Dumping '{filepath}' as plain text")
     return None
